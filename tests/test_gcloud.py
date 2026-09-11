@@ -46,6 +46,105 @@ class GCloudStorageTests(GCloudTestCase):
             f.blob.download_to_file = lambda tmpfile, **kwargs: tmpfile.write(data)
             self.assertEqual(f.read(), data)
 
+    def test_open_stream(self):
+        """Normalize a GCS path and make one bounded request per read."""
+
+        blob = mock.MagicMock()
+        blob.size = 10
+        blob.download_as_bytes.side_effect = (b"abc", b"de")
+        self.storage.location = "media"
+        self.storage._bucket = mock.MagicMock()
+        self.storage._bucket.get_blob.return_value = blob
+
+        with self.storage.open_stream(
+            "folder/../artifact", start=2, length=5
+        ) as stream:
+            self.assertEqual(stream.read(3), b"abc")
+            self.assertEqual(stream.read(3), b"de")
+            self.assertEqual(stream.read(1), b"")
+
+        self.storage._bucket.get_blob.assert_called_once_with(
+            "media/artifact", chunk_size=None
+        )
+        self.assertEqual(
+            blob.download_as_bytes.call_args_list,
+            [
+                mock.call(start=2, end=4, retry=DEFAULT_RETRY),
+                mock.call(start=5, end=6, retry=DEFAULT_RETRY),
+            ],
+        )
+
+    def test_open_stream_rejects_invalid_range(self):
+        """Reject ranges that cannot select bytes from a GCS blob."""
+
+        with self.assertRaisesRegex(ValueError, "start"):
+            with self.storage.open_stream(self.filename, start=-1):
+                pass
+        with self.assertRaisesRegex(ValueError, "length"):
+            with self.storage.open_stream(self.filename, length=0):
+                pass
+
+    def test_open_stream_reads_entire_blob_by_default(self):
+        """Start at byte zero when the caller does not select a range."""
+
+        blob = mock.MagicMock()
+        blob.size = 6
+        blob.download_as_bytes.side_effect = (b"abc", b"def")
+        self.storage._bucket = mock.MagicMock()
+        self.storage._bucket.get_blob.return_value = blob
+
+        with self.storage.open_stream("artifact") as stream:
+            self.assertEqual(stream.read(3), b"abc")
+            self.assertEqual(stream.read(3), b"def")
+            self.assertEqual(stream.read(3), b"")
+
+        self.assertEqual(
+            blob.download_as_bytes.call_args_list,
+            [
+                mock.call(start=0, end=2, retry=DEFAULT_RETRY),
+                mock.call(start=3, end=5, retry=DEFAULT_RETRY),
+            ],
+        )
+
+    def test_open_stream_to_end(self):
+        """Request from an offset through EOF when no byte count is supplied."""
+
+        blob = mock.MagicMock()
+        blob.size = 8
+        blob.download_as_bytes.side_effect = (b"cde", b"fgh")
+        self.storage._bucket = mock.MagicMock()
+        self.storage._bucket.get_blob.return_value = blob
+
+        with self.storage.open_stream("artifact", start=2) as stream:
+            self.assertEqual(stream.read(3), b"cde")
+            self.assertEqual(stream.read(3), b"fgh")
+            self.assertEqual(stream.read(3), b"")
+
+        self.assertEqual(
+            blob.download_as_bytes.call_args_list,
+            [
+                mock.call(start=2, end=4, retry=DEFAULT_RETRY),
+                mock.call(start=5, end=7, retry=DEFAULT_RETRY),
+            ],
+        )
+
+    def test_open_stream_stops_at_end_of_blob(self):
+        """Do not request past EOF when the selected range exceeds the blob."""
+
+        blob = mock.MagicMock()
+        blob.size = 5
+        blob.download_as_bytes.return_value = b"cde"
+        self.storage._bucket = mock.MagicMock()
+        self.storage._bucket.get_blob.return_value = blob
+
+        with self.storage.open_stream("artifact", start=2, length=9) as stream:
+            self.assertEqual(stream.read(9), b"cde")
+            self.assertEqual(stream.read(1), b"")
+
+        blob.download_as_bytes.assert_called_once_with(
+            start=2, end=4, retry=DEFAULT_RETRY
+        )
+
     def test_open_read_num_bytes(self):
         data = b"This is some test read data."
         num_bytes = 10

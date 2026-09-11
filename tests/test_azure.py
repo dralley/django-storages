@@ -70,6 +70,69 @@ class AzureStorageTest(TestCase):
             self.storage._get_valid_path(some_path),
         )
 
+    def test_open_stream(self):
+        """Normalize Azure paths and limit reads to the requested byte interval."""
+
+        downloader = mock.MagicMock()
+        downloader.chunks.return_value = (b"abc", b"def")
+        self.storage.location = "media"
+        self.storage._client.download_blob.return_value = downloader
+
+        with self.storage.open_stream(
+            "folder/../artifact", start=1, length=5
+        ) as stream:
+            self.assertEqual(stream.read(2), b"ab")
+            self.assertEqual(stream.read(2), b"cd")
+            self.assertEqual(stream.read(2), b"e")
+
+        self.storage._client.download_blob.assert_called_once_with(
+            "media/artifact", offset=1, length=5, timeout=self.storage.timeout
+        )
+
+    def test_open_stream_reads_entire_blob_by_default(self):
+        """Read a whole blob without a byte-range argument."""
+
+        downloader = mock.MagicMock()
+        downloader.chunks.return_value = (b"abc", b"def")
+        self.storage._client.download_blob.return_value = downloader
+
+        with self.storage.open_stream("artifact") as stream:
+            self.assertEqual(stream.read(3), b"abc")
+            self.assertEqual(stream.read(3), b"def")
+            self.assertEqual(stream.read(), b"")
+
+        self.storage._client.download_blob.assert_called_once_with(
+            "artifact", offset=0, length=None, timeout=self.storage.timeout
+        )
+
+    def test_open_stream_to_end(self):
+        """Request from an offset through EOF when no byte count is supplied."""
+
+        downloader = mock.MagicMock()
+        downloader.chunks.return_value = (b"def", b"ghi")
+        self.storage._client.download_blob.return_value = downloader
+
+        with self.storage.open_stream("artifact", start=3) as stream:
+            self.assertEqual(stream.read(3), b"def")
+            self.assertEqual(stream.read(3), b"ghi")
+            self.assertEqual(stream.read(3), b"")
+
+        self.storage._client.download_blob.assert_called_once_with(
+            "artifact", offset=3, length=None, timeout=self.storage.timeout
+        )
+
+    def test_open_stream_rejects_invalid_range(self):
+        """Fail before contacting Azure for invalid byte-range arguments."""
+
+        with self.assertRaisesRegex(ValueError, "start"):
+            with self.storage.open_stream("artifact", start=-1):
+                pass
+        with self.assertRaisesRegex(ValueError, "length"):
+            with self.storage.open_stream("artifact", length=0):
+                pass
+
+        self.storage._client.download_blob.assert_not_called()
+
     def test_get_available_name(self):
         self.storage.overwrite_files = False
         client_mock = mock.MagicMock()
